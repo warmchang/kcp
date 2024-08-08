@@ -26,6 +26,7 @@ endif
 GO_INSTALL = ./hack/go-install.sh
 
 TOOLS_DIR=hack/tools
+ROOT_DIR=$(abspath .)
 TOOLS_GOBIN_DIR := $(abspath $(TOOLS_DIR))
 GOBIN_DIR=$(abspath ./bin)
 PATH := $(GOBIN_DIR):$(TOOLS_GOBIN_DIR):$(PATH)
@@ -39,7 +40,7 @@ else
 INSTALL_GOBIN=$(shell go env GOBIN)
 endif
 
-CONTROLLER_GEN_VER := v0.10.0
+CONTROLLER_GEN_VER := v0.15.0
 CONTROLLER_GEN_BIN := controller-gen
 CONTROLLER_GEN := $(TOOLS_DIR)/$(CONTROLLER_GEN_BIN)-$(CONTROLLER_GEN_VER)
 export CONTROLLER_GEN # so hack scripts can use it
@@ -54,11 +55,11 @@ OPENSHIFT_GOIMPORTS_BIN := openshift-goimports
 OPENSHIFT_GOIMPORTS := $(TOOLS_DIR)/$(OPENSHIFT_GOIMPORTS_BIN)-$(OPENSHIFT_GOIMPORTS_VER)
 export OPENSHIFT_GOIMPORTS # so hack scripts can use it
 
-GOLANGCI_LINT_VER := v1.54.2
+GOLANGCI_LINT_VER := v1.58.1
 GOLANGCI_LINT_BIN := golangci-lint
 GOLANGCI_LINT := $(TOOLS_GOBIN_DIR)/$(GOLANGCI_LINT_BIN)-$(GOLANGCI_LINT_VER)
 
-STATICCHECK_VER := 2023.1
+STATICCHECK_VER := 2023.1.7
 STATICCHECK_BIN := staticcheck
 STATICCHECK := $(TOOLS_GOBIN_DIR)/$(STATICCHECK_BIN)-$(STATICCHECK_VER)
 
@@ -66,7 +67,7 @@ GOTESTSUM_VER := v1.8.1
 GOTESTSUM_BIN := gotestsum
 GOTESTSUM := $(abspath $(TOOLS_DIR))/$(GOTESTSUM_BIN)-$(GOTESTSUM_VER)
 
-LOGCHECK_VER := v0.7.0
+LOGCHECK_VER := v0.8.2
 LOGCHECK_BIN := logcheck
 LOGCHECK := $(TOOLS_GOBIN_DIR)/$(LOGCHECK_BIN)-$(LOGCHECK_VER)
 export LOGCHECK # so hack scripts can use it
@@ -76,9 +77,8 @@ CODE_GENERATOR_BIN := code-generator
 CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
 export CODE_GENERATOR # so hack scripts can use it
 
-KCP_APIGEN_VER := v0.21.0
 KCP_APIGEN_BIN := apigen
-KCP_APIGEN_GEN := $(TOOLS_DIR)/$(KCP_APIGEN_BIN)-$(KCP_APIGEN_VER)
+KCP_APIGEN_GEN := $(TOOLS_DIR)/$(KCP_APIGEN_BIN)
 export KCP_APIGEN_GEN # so hack scripts can use it
 
 ARCH := $(shell go env GOARCH)
@@ -118,8 +118,9 @@ require-%:
 build: WHAT ?= ./cmd/... ./cli/cmd/...
 build: require-jq require-go require-git verify-go-versions ## Build the project
 	set -x; for W in $(WHAT); do \
-  		W=$$(echo "$${W}" | sed 's,^\./,github.com/kcp-dev/kcp/,') && \
-    	GOOS=$(OS) GOARCH=$(ARCH) CGO_ENABLED=0 go build $(BUILDFLAGS) -ldflags="$(LDFLAGS)" -o bin $${W}; \
+		pushd . && cd $${W%..}; \
+    	GOOS=$(OS) GOARCH=$(ARCH) CGO_ENABLED=0 go build $(BUILDFLAGS) -ldflags="$(LDFLAGS)" -o $(ROOT_DIR)/bin ./...; \
+		popd; \
     done
 	ln -sf kubectl-workspace bin/kubectl-workspaces
 	ln -sf kubectl-workspace bin/kubectl-ws
@@ -152,7 +153,7 @@ $(CODE_GENERATOR):
 	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/kcp-dev/code-generator/v2 $(CODE_GENERATOR_BIN) $(CODE_GENERATOR_VER)
 
 $(KCP_APIGEN_GEN):
-	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/kcp-dev/kcp/sdk/cmd/apigen $(KCP_APIGEN_BIN) $(KCP_APIGEN_VER)
+	pushd . && cd sdk && GOBIN=$(TOOLS_GOBIN_DIR) go install ./cmd/apigen && popd
 
 lint: $(GOLANGCI_LINT) $(STATICCHECK) $(LOGCHECK) ## Verify lint
 	$(GOLANGCI_LINT) run --timeout 20m ./...
@@ -167,7 +168,8 @@ update-contextual-logging: $(LOGCHECK) ## Update contextual logging
 .PHONY: generate-cli-docs
 generate-cli-docs: ## Generate cli docs
 	git clean -fdX docs/content/reference/cli
-	go run ./docs/generators/cli-doc/gen-cli-doc.go -output docs/content/reference/cli
+	pushd . && cd docs/generators/cli-doc && go build . && popd
+	./docs/generators/cli-doc/cli-doc -output docs/content/reference/cli
 
 .PHONY: generate-api-docs
 generate-api-docs: ## Generate api docs
@@ -203,9 +205,6 @@ $(YAML_PATCH):
 
 $(GOTESTSUM):
 	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) gotest.tools/gotestsum $(GOTESTSUM_BIN) $(GOTESTSUM_VER)
-
-$(KCP_APIGEN_GEN):
-	GOBIN=$(TOOLS_GOBIN_DIR) $(GO_INSTALL) github.com/kcp-dev/kcp/sdk/cmd/apigen $(KCP_APIGEN_BIN) $(KCP_APIGEN_VER)
 
 crds: $(CONTROLLER_GEN) $(YAML_PATCH) ## Generate crds
 	./hack/update-codegen-crds.sh
