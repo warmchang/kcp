@@ -84,6 +84,7 @@ import (
 	"github.com/kcp-dev/kcp/pkg/reconciler/garbagecollector"
 	"github.com/kcp-dev/kcp/pkg/reconciler/kubequota"
 	"github.com/kcp-dev/kcp/pkg/reconciler/tenancy/bootstrap"
+	"github.com/kcp-dev/kcp/pkg/reconciler/tenancy/defaultapibindinglifecycle"
 	"github.com/kcp-dev/kcp/pkg/reconciler/tenancy/initialization"
 	tenancylogicalcluster "github.com/kcp-dev/kcp/pkg/reconciler/tenancy/logicalcluster"
 	tenancyreplicateclusterrole "github.com/kcp-dev/kcp/pkg/reconciler/tenancy/replicateclusterrole"
@@ -894,6 +895,65 @@ func (s *Server) installAPIBindingController(ctx context.Context, config *rest.C
 	})
 }
 
+func (s *Server) installDefaultAPIBindingController(ctx context.Context, config *rest.Config) error {
+	// Client used to maintain APIBindings within the workspaces
+	config = rest.CopyConfig(config)
+	config = rest.AddUserAgent(config, defaultapibindinglifecycle.ControllerName)
+
+	if !s.Options.Virtual.Enabled && s.Options.Extra.ShardVirtualWorkspaceURL != "" {
+		if s.Options.Extra.ShardVirtualWorkspaceCAFile == "" {
+			// TODO move verification up
+			return fmt.Errorf("s.Options.Extra.ShardVirtualWorkspaceCAFile is required")
+		}
+		if s.Options.Extra.ShardClientCertFile == "" {
+			// TODO move verification up
+			return fmt.Errorf("s.Options.Extra.ShardClientCertFile is required")
+		}
+		if s.Options.Extra.ShardClientKeyFile == "" {
+			// TODO move verification up
+			return fmt.Errorf("s.Options.Extra.ShardClientKeyFile is required")
+		}
+		config.TLSClientConfig.CAFile = s.Options.Extra.ShardVirtualWorkspaceCAFile
+		config.TLSClientConfig.CertFile = s.Options.Extra.ShardClientCertFile
+		config.TLSClientConfig.KeyFile = s.Options.Extra.ShardClientKeyFile
+	}
+
+	kcpClusterClient, err := kcpclientset.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+
+	c, err := defaultapibindinglifecycle.NewDefaultAPIBindingController(
+		kcpClusterClient,
+		s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters(),
+		s.KcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes(),
+		s.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes(),
+		s.KcpSharedInformerFactory.Apis().V1alpha2().APIBindings(),
+		s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports(),
+		s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports(),
+	)
+	if err != nil {
+		return err
+	}
+
+	return s.registerController(&controllerWrapper{
+		Name: defaultapibindinglifecycle.ControllerName,
+		Wait: func(ctx context.Context, s *Server) error {
+			return wait.PollUntilContextCancel(ctx, waitPollInterval, true, func(ctx context.Context) (bool, error) {
+				return s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().HasSynced() &&
+					s.KcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced() &&
+					s.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced() &&
+					s.KcpSharedInformerFactory.Apis().V1alpha2().APIBindings().Informer().HasSynced() &&
+					s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced() &&
+					s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced(), nil
+			})
+		},
+		Runner: func(ctx context.Context) {
+			c.Start(ctx, 2)
+		},
+	})
+}
+
 func (s *Server) installAPIBinderController(ctx context.Context, config *rest.Config) error {
 	// Client used to create APIBindings within the initializing workspace
 	config = rest.CopyConfig(config)
@@ -1617,13 +1677,13 @@ func (s *Server) installDynamicRESTMapper(ctx context.Context, config *rest.Conf
 		Name: dynamicrestmapper.ControllerName,
 		Wait: func(ctx context.Context, s *Server) error {
 			return wait.PollUntilContextCancel(ctx, waitPollInterval, true, func(ctx context.Context) (bool, error) {
-				return s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().HasSynced() &&
-					s.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Informer().HasSynced() &&
+				return s.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Informer().HasSynced() &&
+					s.KcpSharedInformerFactory.Apis().V1alpha1().APIBindings().Informer().HasSynced() &&
 					s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced() &&
-					s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced() &&
 					s.KcpSharedInformerFactory.Apis().V1alpha1().APIResourceSchemas().Informer().HasSynced() &&
+					s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced() &&
 					s.CacheKcpSharedInformerFactory.Apis().V1alpha1().APIResourceSchemas().Informer().HasSynced() &&
-					s.KcpSharedInformerFactory.Apis().V1alpha1().APIBindings().Informer().HasSynced(), nil
+					s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().HasSynced(), nil
 			})
 		},
 		Runner: func(ctx context.Context) {
@@ -1728,6 +1788,7 @@ func (s *Server) addIndexersToInformers(_ context.Context) map[schema.GroupVersi
 		s.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes(),
 	)
 	workspacemounts.InstallIndexers(
+		s.DynRESTMapper,
 		s.KcpSharedInformerFactory.Tenancy().V1alpha1().Workspaces(),
 	)
 	extraannotationsync.InstallIndexers(
@@ -1739,6 +1800,10 @@ func (s *Server) addIndexersToInformers(_ context.Context) map[schema.GroupVersi
 		s.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes())
 	crdcleanup.InstallIndexers(
 		s.KcpSharedInformerFactory.Apis().V1alpha2().APIBindings(),
+	)
+	defaultapibindinglifecycle.InstallIndexers(
+		s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports(),
+		s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports(),
 	)
 	return replication.InstallIndexers(
 		s.KcpSharedInformerFactory,
