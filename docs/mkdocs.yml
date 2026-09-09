@@ -95,6 +95,8 @@ plugins:
   # Configure multi-version plugin
   - mike:
       alias_type: redirect
+  # Click images to enlarge them in a lightbox
+  - glightbox
 
 markdown_extensions:
   # Code block highlighting
